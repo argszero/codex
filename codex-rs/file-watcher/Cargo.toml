@@ -13,7 +13,7 @@ doctest = false
 workspace = true
 
 [dependencies]
-notify = { workspace = true }
+notify = { workspace = true, features = ["macos_kqueue"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true, features = ["log"] }
 

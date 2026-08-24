@@ -591,3 +591,47 @@ async fn dropping_live_watcher_releases_inner_watcher() {
 
     assert_eq!(weak_inner.upgrade().is_none(), true);
 }
+
+#[tokio::test]
+async fn live_watcher_reports_appends_through_open_fd() {
+    // Regression test for https://github.com/openai/codex/issues/39624: on
+    // macOS the FSEvents backend does not reliably deliver events for appends
+    // made through a long-lived open fd, which is how rollout JSONL files are
+    // written (the writer keeps one append-mode handle for the session).
+    use std::io::Write;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let target = temp_dir.path().join("rollout.jsonl");
+    std::fs::write(&target, "{\"ordinal\":1}\n").expect("write initial content");
+
+    let watcher = Arc::new(FileWatcher::new().expect("live watcher"));
+    let (subscriber, rx) = watcher.add_subscriber();
+    let _registration = subscriber.register_path(target.clone(), /*recursive*/ false);
+    let mut rx = DebouncedWatchReceiver::new(rx, TEST_THROTTLE_INTERVAL);
+
+    // Give the backend time to finish arming the watch before appending.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Append records through a persistent open fd, like the rollout writer.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&target)
+        .expect("open for append");
+    writeln!(file, "{{\"ordinal\":2}}").expect("append record");
+    file.flush().expect("flush append");
+    std::thread::sleep(Duration::from_millis(50));
+    writeln!(file, "{{\"ordinal\":3}}").expect("append record");
+    file.flush().expect("flush append");
+
+    let event = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("append event timeout")
+        .expect("append event");
+    assert!(
+        event
+            .paths
+            .iter()
+            .any(|changed_path| changed_path == &target),
+        "expected append event for {target:?}, got {event:?}"
+    );
+}

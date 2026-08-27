@@ -1175,12 +1175,23 @@ pub async fn run_main_with_transport_options(
             } else {
                 connection_cleanup_tasks.abort();
             }
-            info!(
-                exit_reason,
-                remaining_connection_count = connections.len(),
-                shutdown_forced = shutdown_state.forced(),
-                "processor task exited"
-            );
+            let running_turn_count = *running_turn_count_rx.borrow();
+            if running_turn_count > 0 {
+                warn!(
+                    exit_reason,
+                    running_turn_count,
+                    remaining_connection_count = connections.len(),
+                    shutdown_forced = shutdown_state.forced(),
+                    "processor task exited while a turn was still running"
+                );
+            } else {
+                info!(
+                    exit_reason,
+                    remaining_connection_count = connections.len(),
+                    shutdown_forced = shutdown_state.forced(),
+                    "processor task exited"
+                );
+            }
         }
     });
 

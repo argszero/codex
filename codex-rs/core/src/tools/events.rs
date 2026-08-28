@@ -32,8 +32,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::format_exec_output_str;
-
 const REJECTION_MESSAGE_MAX_TOKENS: usize = 900;
 
 pub(super) fn truncate_rejection_message(message: &str) -> String {
@@ -498,7 +496,6 @@ struct ExecCommandResult {
     aggregated_output: String,
     exit_code: i32,
     duration: Duration,
-    formatted_output: String,
     status: ExecCommandStatus,
 }
 
@@ -519,10 +516,6 @@ async fn emit_exec_stage(
                 aggregated_output: output.aggregated_output.text.clone(),
                 exit_code: output.exit_code,
                 duration: output.duration,
-                formatted_output: format_exec_output_str(
-                    &output,
-                    ctx.turn.model_info().truncation_policy.into(),
-                ),
                 status: if output.exit_code == 0 {
                     ExecCommandStatus::Completed
                 } else {
@@ -539,7 +532,6 @@ async fn emit_exec_stage(
                 aggregated_output: text.clone(),
                 exit_code: -1,
                 duration: Duration::ZERO,
-                formatted_output: text,
                 status: ExecCommandStatus::Failed,
             };
             emit_exec_end(ctx, exec_input, exec_result).await;
@@ -552,7 +544,6 @@ async fn emit_exec_stage(
                 aggregated_output: text.clone(),
                 exit_code: -1,
                 duration: Duration::ZERO,
-                formatted_output: text,
                 status: ExecCommandStatus::Declined,
             };
             emit_exec_end(ctx, exec_input, exec_result).await;
@@ -585,7 +576,7 @@ async fn emit_exec_end(
                 aggregated_output: Some(exec_result.aggregated_output),
                 exit_code: Some(exec_result.exit_code),
                 duration: Some(exec_result.duration),
-                formatted_output: Some(exec_result.formatted_output),
+                formatted_output: None,
             }),
         )
         .await;

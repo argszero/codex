@@ -10,9 +10,25 @@ use tokio::fs;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DaemonSettings {
     pub(crate) remote_control_enabled: bool,
+    /// Seconds to wait after SIGTERM before force-terminating (SIGKILL) a draining
+    /// app-server. `null`/absent → 60 (default); `0` → unbounded (never auto-SIGKILL
+    /// while the app-server is still draining turns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stop_grace_period_secs: Option<u64>,
+    /// Total stop budget in seconds before the daemon gives up on a stopping
+    /// app-server. `null`/absent → 70 (default); `0` → wait indefinitely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stop_timeout_secs: Option<u64>,
+    /// Whether the daemon runs the auto-update loop. `null`/absent → true (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auto_update_enabled: Option<bool>,
 }
 
 impl DaemonSettings {
+    pub(crate) fn auto_update_enabled(&self) -> bool {
+        self.auto_update_enabled.unwrap_or(true)
+    }
+
     pub(crate) async fn load(path: &Path) -> Result<Self> {
         let contents = match fs::read_to_string(path).await {
             Ok(contents) => contents,
@@ -55,9 +71,18 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DaemonSettings {
                 remote_control_enabled: true,
+                ..Default::default()
             })
             .expect("serialize"),
             r#"{"remoteControlEnabled":true}"#
         );
+    }
+
+    #[test]
+    fn daemon_settings_default_to_current_behavior_when_absent() {
+        let settings = DaemonSettings::default();
+        assert!(settings.auto_update_enabled());
+        assert_eq!(settings.stop_grace_period_secs, None);
+        assert_eq!(settings.stop_timeout_secs, None);
     }
 }

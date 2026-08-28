@@ -713,6 +713,12 @@ enum AppServerDaemonSubcommand {
     /// Disable remote control for future starts and a currently running managed daemon.
     DisableRemoteControl,
 
+    /// Enable automatic app-server updates for future starts and a currently running managed daemon.
+    EnableAutoUpdate,
+
+    /// Disable automatic app-server updates for future starts and a currently running managed daemon.
+    DisableAutoUpdate,
+
     /// Stop the local app server daemon.
     Stop,
 
@@ -1321,6 +1327,12 @@ async fn cli_main(
                             AppServerRemoteControlMode::Disabled,
                         )
                         .await?;
+                    }
+                    AppServerDaemonSubcommand::EnableAutoUpdate => {
+                        print_app_server_auto_update_output(true).await?;
+                    }
+                    AppServerDaemonSubcommand::DisableAutoUpdate => {
+                        print_app_server_auto_update_output(false).await?;
                     }
                     AppServerDaemonSubcommand::Stop => {
                         print_app_server_daemon_output(AppServerLifecycleCommand::Stop).await?;
@@ -2493,6 +2505,8 @@ fn app_server_subcommand_name(subcommand: Option<&AppServerSubcommand>) -> &'sta
             AppServerDaemonSubcommand::DisableRemoteControl => {
                 "app-server daemon disable-remote-control"
             }
+            AppServerDaemonSubcommand::EnableAutoUpdate => "app-server daemon enable-auto-update",
+            AppServerDaemonSubcommand::DisableAutoUpdate => "app-server daemon disable-auto-update",
             AppServerDaemonSubcommand::Stop => "app-server daemon stop",
             AppServerDaemonSubcommand::Version => "app-server daemon version",
             AppServerDaemonSubcommand::PidUpdateLoop => "app-server daemon pid-update-loop",
@@ -2530,6 +2544,12 @@ async fn print_app_server_remote_control_output(
     mode: AppServerRemoteControlMode,
 ) -> anyhow::Result<()> {
     let output = codex_app_server_daemon::set_remote_control(mode).await?;
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+async fn print_app_server_auto_update_output(enabled: bool) -> anyhow::Result<()> {
+    let output = codex_app_server_daemon::set_auto_update(enabled).await?;
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
@@ -4675,6 +4695,20 @@ mod tests {
             .subcommand,
             Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
                 subcommand: AppServerDaemonSubcommand::DisableRemoteControl
+            }))
+        ));
+        assert!(matches!(
+            app_server_from_args(["codex", "app-server", "daemon", "enable-auto-update"].as_ref())
+                .subcommand,
+            Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
+                subcommand: AppServerDaemonSubcommand::EnableAutoUpdate
+            }))
+        ));
+        assert!(matches!(
+            app_server_from_args(["codex", "app-server", "daemon", "disable-auto-update"].as_ref())
+                .subcommand,
+            Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
+                subcommand: AppServerDaemonSubcommand::DisableAutoUpdate
             }))
         ));
         assert!(matches!(

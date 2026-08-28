@@ -19,17 +19,23 @@ pub(crate) struct BackendPaths {
     pub(crate) pid_file: PathBuf,
     pub(crate) update_pid_file: PathBuf,
     pub(crate) remote_control_enabled: bool,
+    pub(crate) stop_grace_period_secs: Option<u64>,
+    pub(crate) stop_timeout_secs: Option<u64>,
 }
 
 pub(crate) fn pid_backend(paths: BackendPaths) -> PidBackend {
-    PidBackend::new(
+    PidBackend::with_stop_policy(
         paths.codex_bin,
         paths.pid_file,
         paths.remote_control_enabled,
+        pid::resolve_stop_grace(paths.stop_grace_period_secs),
+        pid::resolve_stop_timeout(paths.stop_timeout_secs),
     )
 }
 
 pub(crate) fn pid_update_loop_backend(paths: BackendPaths) -> PidBackend {
+    // The update loop has no turns to drain — always use the default stop policy
+    // so an operator's unbounded drain setting can never wedge disable-auto-update.
     PidBackend::new_update_loop(paths.codex_bin, paths.update_pid_file)
 }
 

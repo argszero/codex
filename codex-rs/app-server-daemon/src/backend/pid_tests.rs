@@ -195,6 +195,8 @@ fn update_loop_uses_hidden_app_server_subcommand() {
         pid_file: "updater.pid".into(),
         lock_file: "updater.pid.lock".into(),
         command_kind: PidCommandKind::UpdateLoop,
+        stop_grace_period: None,
+        stop_timeout: None,
     };
 
     assert_eq!(
@@ -253,5 +255,28 @@ async fn read_stderr_log_tail_returns_recent_complete_lines() {
             path: log_file,
             contents: "recent error\nusage".to_string(),
         })
+    );
+}
+
+#[test]
+fn resolve_stop_grace_maps_settings() {
+    assert_eq!(
+        super::resolve_stop_grace(None),
+        Some(super::STOP_GRACE_PERIOD)
+    );
+    assert_eq!(super::resolve_stop_grace(Some(0)), None); // unbounded
+    assert_eq!(
+        super::resolve_stop_grace(Some(30)),
+        Some(Duration::from_secs(30))
+    );
+}
+
+#[test]
+fn resolve_stop_timeout_maps_settings() {
+    assert_eq!(super::resolve_stop_timeout(None), Some(super::STOP_TIMEOUT));
+    assert_eq!(super::resolve_stop_timeout(Some(0)), None); // wait indefinitely
+    assert_eq!(
+        super::resolve_stop_timeout(Some(120)),
+        Some(Duration::from_secs(120))
     );
 }

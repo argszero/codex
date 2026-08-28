@@ -20,10 +20,32 @@ use tokio::process::Command;
 use tokio::time::sleep;
 
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const STOP_GRACE_PERIOD: Duration = Duration::from_secs(60);
-const STOP_TIMEOUT: Duration = Duration::from_secs(70);
+pub(crate) const STOP_GRACE_PERIOD: Duration = Duration::from_secs(60);
+pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(70);
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STDERR_LOG_TAIL_BYTES: u64 = 4096;
+
+/// Resolve a settings `stopGracePeriodSecs` value into a stop policy.
+/// `None` (absent) → default; `Some(0)` → unbounded (never force-terminate);
+/// `Some(n)` → force-terminate after n seconds.
+pub(crate) fn resolve_stop_grace(secs: Option<u64>) -> Option<Duration> {
+    match secs {
+        None => Some(STOP_GRACE_PERIOD),
+        Some(0) => None,
+        Some(n) => Some(Duration::from_secs(n)),
+    }
+}
+
+/// Resolve a settings `stopTimeoutSecs` value into a stop policy.
+/// `None` (absent) → default; `Some(0)` → wait indefinitely;
+/// `Some(n)` → give up after n seconds.
+pub(crate) fn resolve_stop_timeout(secs: Option<u64>) -> Option<Duration> {
+    match secs {
+        None => Some(STOP_TIMEOUT),
+        Some(0) => None,
+        Some(n) => Some(Duration::from_secs(n)),
+    }
+}
 
 #[derive(Debug)]
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -32,6 +54,10 @@ pub(crate) struct PidBackend {
     pid_file: PathBuf,
     lock_file: PathBuf,
     command_kind: PidCommandKind,
+    /// None = never auto-SIGKILL while draining (unbounded drain).
+    stop_grace_period: Option<Duration>,
+    /// None = wait indefinitely for the process to exit.
+    stop_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,16 +101,15 @@ enum PidCommandKind {
 }
 
 impl PidBackend {
+    #[cfg(test)]
     pub(crate) fn new(codex_bin: PathBuf, pid_file: PathBuf, remote_control_enabled: bool) -> Self {
-        let lock_file = pid_file.with_extension("pid.lock");
-        Self {
+        Self::with_stop_policy(
             codex_bin,
             pid_file,
-            lock_file,
-            command_kind: PidCommandKind::AppServer {
-                remote_control_enabled,
-            },
-        }
+            remote_control_enabled,
+            Some(STOP_GRACE_PERIOD),
+            Some(STOP_TIMEOUT),
+        )
     }
 
     pub(crate) fn new_update_loop(codex_bin: PathBuf, pid_file: PathBuf) -> Self {
@@ -94,6 +119,28 @@ impl PidBackend {
             pid_file,
             lock_file,
             command_kind: PidCommandKind::UpdateLoop,
+            stop_grace_period: Some(STOP_GRACE_PERIOD),
+            stop_timeout: Some(STOP_TIMEOUT),
+        }
+    }
+
+    pub(crate) fn with_stop_policy(
+        codex_bin: PathBuf,
+        pid_file: PathBuf,
+        remote_control_enabled: bool,
+        stop_grace_period: Option<Duration>,
+        stop_timeout: Option<Duration>,
+    ) -> Self {
+        let lock_file = pid_file.with_extension("pid.lock");
+        Self {
+            codex_bin,
+            pid_file,
+            lock_file,
+            command_kind: PidCommandKind::AppServer {
+                remote_control_enabled,
+            },
+            stop_grace_period,
+            stop_timeout,
         }
     }
 
@@ -252,7 +299,9 @@ impl PidBackend {
             let pid = record.pid;
             self.terminate_process(pid)?;
             let started_at = tokio::time::Instant::now();
-            let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
+            let deadline = self
+                .stop_timeout
+                .map(|timeout| tokio::time::Instant::now() + timeout);
             let mut forced = false;
             loop {
                 #[cfg(unix)]
@@ -268,10 +317,15 @@ impl PidBackend {
                         PidFileState::Starting | PidFileState::Running(_) => break,
                     }
                 }
-                if tokio::time::Instant::now() >= deadline {
+                if let Some(deadline) = deadline
+                    && tokio::time::Instant::now() >= deadline
+                {
                     break;
                 }
-                if !forced && started_at.elapsed() >= STOP_GRACE_PERIOD {
+                if !forced
+                    && let Some(grace) = self.stop_grace_period
+                    && started_at.elapsed() >= grace
+                {
                     self.force_terminate_process(pid)?;
                     forced = true;
                 }

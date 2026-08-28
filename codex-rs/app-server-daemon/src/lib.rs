@@ -156,6 +156,24 @@ pub struct RemoteControlOutput {
     pub app_server_version: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AutoUpdateStatus {
+    Enabled,
+    Disabled,
+    AlreadyEnabled,
+    AlreadyDisabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoUpdateOutput {
+    pub status: AutoUpdateStatus,
+    pub auto_update_enabled: bool,
+    pub socket_path: PathBuf,
+    pub cli_version: String,
+}
+
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestartIfRunningOutcome {
@@ -229,6 +247,11 @@ pub async fn start_remote_control_pairing() -> Result<RemoteControlPairingStartR
 pub async fn set_remote_control(mode: RemoteControlMode) -> Result<RemoteControlOutput> {
     ensure_supported_platform()?;
     Daemon::from_environment()?.set_remote_control(mode).await
+}
+
+pub async fn set_auto_update(enabled: bool) -> Result<AutoUpdateOutput> {
+    ensure_supported_platform()?;
+    Daemon::from_environment()?.set_auto_update(enabled).await
 }
 
 pub async fn run_pid_update_loop(
@@ -584,12 +607,61 @@ impl Daemon {
         ))
     }
 
+    async fn set_auto_update(&self, enabled: bool) -> Result<AutoUpdateOutput> {
+        let _operation_lock = self.acquire_operation_lock().await?;
+        self.set_auto_update_locked(enabled).await
+    }
+
+    async fn set_auto_update_locked(&self, enabled: bool) -> Result<AutoUpdateOutput> {
+        let previous_settings = self.load_settings().await?;
+        if previous_settings.auto_update_enabled() == enabled {
+            return Ok(self.auto_update_output(
+                if enabled {
+                    AutoUpdateStatus::AlreadyEnabled
+                } else {
+                    AutoUpdateStatus::AlreadyDisabled
+                },
+                enabled,
+            ));
+        }
+
+        let mut settings = previous_settings;
+        settings.auto_update_enabled = Some(enabled);
+        settings.save(&self.settings_file).await?;
+
+        let updater = backend::pid_update_loop_backend(self.backend_paths(&settings));
+        if enabled {
+            if !updater.is_starting_or_running().await? {
+                updater.start().await?;
+            }
+        } else if updater.is_starting_or_running().await? {
+            updater.stop().await?;
+        }
+
+        Ok(self.auto_update_output(
+            if enabled {
+                AutoUpdateStatus::Enabled
+            } else {
+                AutoUpdateStatus::Disabled
+            },
+            enabled,
+        ))
+    }
+
+    fn auto_update_output(&self, status: AutoUpdateStatus, enabled: bool) -> AutoUpdateOutput {
+        AutoUpdateOutput {
+            status,
+            auto_update_enabled: enabled,
+            socket_path: self.socket_path.clone(),
+            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
     async fn bootstrap_locked(&self, options: BootstrapOptions) -> Result<BootstrapOutput> {
         self.ensure_managed_codex_bin()?;
 
-        let settings = DaemonSettings {
-            remote_control_enabled: options.remote_control_enabled,
-        };
+        let mut settings = self.load_settings().await?;
+        settings.remote_control_enabled = options.remote_control_enabled;
         if client::probe(&self.socket_path).await.is_ok()
             && self.running_backend(&settings).await?.is_none()
         {
@@ -609,14 +681,16 @@ impl Daemon {
         if updater.is_starting_or_running().await? {
             updater.stop().await?;
         }
-        updater.start().await?;
+        if settings.auto_update_enabled() {
+            updater.start().await?;
+        }
 
         let info = self.wait_until_ready().await?;
         let managed_codex_version = self.managed_codex_version_best_effort().await;
         Ok(BootstrapOutput {
             status: BootstrapStatus::Bootstrapped,
             backend: BackendKind::Pid,
-            auto_update_enabled: true,
+            auto_update_enabled: settings.auto_update_enabled(),
             remote_control_enabled: settings.remote_control_enabled,
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
@@ -660,8 +734,10 @@ impl Daemon {
     }
 
     async fn is_bootstrapped(&self, settings: &DaemonSettings) -> Result<bool> {
-        let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
-        updater.is_starting_or_running().await
+        Ok(self.running_backend_instance(settings).await?.is_some()
+            || backend::pid_update_loop_backend(self.backend_paths(settings))
+                .is_starting_or_running()
+                .await?)
     }
 
     fn ensure_managed_codex_bin(&self) -> Result<()> {
@@ -703,6 +779,8 @@ impl Daemon {
             pid_file: self.pid_file.clone(),
             update_pid_file: self.update_pid_file.clone(),
             remote_control_enabled: settings.remote_control_enabled,
+            stop_grace_period_secs: settings.stop_grace_period_secs,
+            stop_timeout_secs: settings.stop_timeout_secs,
         }
     }
 

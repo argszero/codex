@@ -55,6 +55,9 @@ mod reader;
 
 const IPC_CHANNEL_CAPACITY: usize = 128;
 const LOCAL_HOST_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+// Keep only the tail of the host's stderr so a chatty host cannot grow the
+// handshake diagnostics buffer without bound.
+const MAX_CAPTURED_STDERR_LINES: usize = 32;
 // TODO(anp) make this timeout configurable if 60 seconds is insufficient.
 const DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(60);
 // Host spawn errors become model-visible tool output. Bound configured paths
@@ -168,12 +171,23 @@ impl Connection {
             error,
         })?;
 
+        let stderr_tail = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         if let Some(stderr) = child.stderr.take() {
+            let stderr_tail = Arc::clone(&stderr_tail);
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 loop {
                     match lines.next_line().await {
-                        Ok(Some(line)) => debug!("code-mode host stderr: {line}"),
+                        Ok(Some(line)) => {
+                            debug!("code-mode host stderr: {line}");
+                            let mut tail = stderr_tail
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            tail.push(line);
+                            while tail.len() > MAX_CAPTURED_STDERR_LINES {
+                                tail.remove(0);
+                            }
+                        }
                         Ok(None) => break,
                         Err(err) => {
                             warn!("failed to read code-mode host stderr: {err}");
@@ -193,13 +207,20 @@ impl Connection {
             .take()
             .ok_or_else(|| ConnectionError::Other("spawned code-mode host has no stdout".into()))?;
 
-        Self::establish(FramedReader::new(stdout), FramedWriter::new(stdin), child).await
+        Self::establish(
+            FramedReader::new(stdout),
+            FramedWriter::new(stdin),
+            child,
+            stderr_tail,
+        )
+        .await
     }
 
     async fn establish(
         mut reader: FramedReader<ChildStdout>,
         mut writer: FramedWriter<ChildStdin>,
         mut child: Child,
+        stderr_tail: Arc<std::sync::Mutex<Vec<String>>>,
     ) -> Result<Self, ConnectionError> {
         let handshake = async {
             let session_limits_capability = Capability::new(SESSION_RESOURCE_LIMITS_CAPABILITY)
@@ -233,7 +254,10 @@ impl Connection {
                 Some(message) => Err(format!(
                     "code-mode host returned an invalid handshake response: {message:?}"
                 )),
-                None => Err("code-mode host exited during handshake".to_string()),
+                None => Err(format!(
+                    "code-mode host exited during handshake{}",
+                    captured_stderr_detail(&stderr_tail).await
+                )),
             }
         };
         let handshake_result =
@@ -241,9 +265,10 @@ impl Connection {
                 Ok(result) => result,
                 Err(_) => {
                     kill_and_reap(&mut child).await;
-                    return Err(ConnectionError::Other(
-                        "timed out negotiating with the code-mode host".into(),
-                    ));
+                    return Err(ConnectionError::Other(format!(
+                        "timed out negotiating with the code-mode host{}",
+                        captured_stderr_detail(&stderr_tail).await
+                    )));
                 }
             };
         let capabilities = match handshake_result {
@@ -583,4 +608,28 @@ fn failure_message(failure: &std::sync::Mutex<Option<String>>) -> String {
 async fn kill_and_reap(child: &mut Child) {
     let _ = child.start_kill();
     let _ = child.wait().await;
+}
+
+/// Best-effort tail of the host's stderr, for surfacing in handshake failure
+/// messages. Waits briefly so lines the host wrote just before exiting are
+/// drained by the stderr reader task before the error is formatted.
+async fn captured_stderr_detail(stderr_tail: &std::sync::Mutex<Vec<String>>) -> String {
+    for _ in 0..5 {
+        if !stderr_tail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let tail = stderr_tail
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if tail.is_empty() {
+        String::new()
+    } else {
+        format!("; host stderr:\n{}", tail.join("\n"))
+    }
 }

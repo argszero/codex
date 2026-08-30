@@ -7,6 +7,7 @@ use pretty_assertions::assert_eq;
 
 use super::ProcessOwnedCodeModeSession;
 use super::ProcessOwnedCodeModeSessionProvider;
+use super::connection::Connection;
 use super::connection::ConnectionError;
 use crate::NoopCodeModeSessionDelegate;
 
@@ -88,4 +89,43 @@ async fn shutdown_before_open_does_not_spawn_the_host() {
         .expect("shutdown session should reject execution");
 
     assert_eq!(error, "code mode session is shutting down");
+}
+
+#[tokio::test]
+async fn host_exiting_during_handshake_includes_captured_stderr() {
+    // A fake host that writes a diagnostic to stderr and exits before
+    // completing the handshake, mirroring a host that crashes at startup.
+    let script_dir = std::env::temp_dir().join(format!(
+        "codex-code-mode-handshake-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&script_dir).expect("create script dir");
+    let script_path = script_dir.join("fake-host.sh");
+    std::fs::write(
+        &script_path,
+        "#!/bin/sh\necho 'init failed: boom' >&2\nexit 1\n",
+    )
+    .expect("write fake host script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake host executable");
+    }
+
+    let error = Connection::spawn(&script_path)
+        .await
+        .err()
+        .expect("fake host should fail the handshake")
+        .to_string();
+
+    let _ = std::fs::remove_dir_all(&script_dir);
+    assert!(
+        error.contains("code-mode host exited during handshake"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("init failed: boom"),
+        "error should surface the host's stderr: {error}"
+    );
 }

@@ -69,7 +69,9 @@ pub(crate) struct ExecContext {
 pub(crate) struct CodeModeService {
     session: OnceCell<Arc<dyn CodeModeSession>>,
     session_provider: Arc<dyn CodeModeSessionProvider>,
-    availability: Result<(), String>,
+    /// Startup availability, updated at runtime when the first host
+    /// connection attempt fails so later turns can surface the failure.
+    availability: std::sync::Mutex<Result<(), String>>,
     dispatch_broker: Arc<CodeModeDispatchBroker>,
     default_exec_yield_time_ms: u64,
     shutdown_token: CancellationToken,
@@ -87,7 +89,7 @@ impl CodeModeService {
         Self {
             session: OnceCell::new(),
             session_provider,
-            availability,
+            availability: std::sync::Mutex::new(availability),
             dispatch_broker,
             default_exec_yield_time_ms: config.default_exec_yield_time_ms,
             shutdown_token: CancellationToken::new(),
@@ -96,11 +98,20 @@ impl CodeModeService {
     }
 
     pub(crate) fn is_available(&self) -> bool {
-        self.availability.is_ok()
+        self.availability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_ok()
     }
 
     pub(crate) fn take_unavailable_warning(&self, tool_mode: ToolMode) -> Option<String> {
-        let error = self.availability.as_ref().err()?;
+        let error = self
+            .availability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .err()?
+            .clone();
         let behavior = match tool_mode {
             ToolMode::Direct => "Falling back to direct tools",
             ToolMode::CodeMode | ToolMode::CodeModeOnly => "Code mode will fail closed",
@@ -243,6 +254,16 @@ impl CodeModeService {
                 Ok(session)
             })
             .await
+            .inspect_err(|error| {
+                // A startup failure means the host exists but cannot start (or
+                // stopped responding). Record it so subsequent turns treat code
+                // mode as unavailable: the per-turn warning fires once and
+                // `CodeMode` sessions fall back to direct tools.
+                *self
+                    .availability
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Err(error.clone());
+            })
             .map(Arc::clone)
     }
 }
@@ -550,6 +571,65 @@ mod tests {
             vec![FunctionCallOutputContentItem::InputText {
                 text: "[omitted 1 audio items ...]".to_string(),
             }]
+        );
+    }
+
+    /// A provider whose host binary exists on disk but dies at startup.
+    struct CrashingHostProvider;
+
+    impl codex_code_mode::CodeModeSessionProvider for CrashingHostProvider {
+        fn availability(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn create_session<'a>(
+            &'a self,
+            _delegate: Arc<dyn codex_code_mode::CodeModeSessionDelegate>,
+        ) -> codex_code_mode::CodeModeSessionProviderFuture<'a> {
+            Box::pin(async { Err("code-mode host exited during handshake".to_string()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_spawn_failure_marks_service_unavailable_and_warns() {
+        let service = super::CodeModeService::new(
+            Arc::new(CrashingHostProvider),
+            &crate::config::CodeModeConfig::default(),
+            None,
+        );
+        assert!(
+            service.is_available(),
+            "host file exists, so startup availability is ok"
+        );
+
+        let error = service
+            .session()
+            .await
+            .err()
+            .expect("session startup should fail");
+        assert!(error.contains("code-mode host exited during handshake"));
+
+        assert!(
+            !service.is_available(),
+            "a runtime spawn failure should mark the service unavailable"
+        );
+
+        let warning = service
+            .take_unavailable_warning(ToolMode::CodeModeOnly)
+            .expect("unavailable warning should fire once");
+        assert!(
+            warning.contains("code-mode host exited during handshake"),
+            "warning should surface the startup error: {warning}"
+        );
+        assert!(
+            warning.contains("Code mode will fail closed"),
+            "warning should explain the fail-closed behavior: {warning}"
+        );
+        assert!(
+            service
+                .take_unavailable_warning(ToolMode::CodeModeOnly)
+                .is_none(),
+            "the unavailable warning is one-shot"
         );
     }
 }

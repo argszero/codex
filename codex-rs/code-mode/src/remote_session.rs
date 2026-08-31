@@ -146,7 +146,6 @@ impl OwnedCodeModeHost {
             return Ok(connection);
         }
 
-        let observed_generation = self.connection_generation.load(Ordering::Acquire);
         let _connect_permit = self.connect_permit.acquire().await.map_err(|_| {
             ConnectionError::Other("code-mode host connection coordinator closed".into())
         })?;
@@ -154,19 +153,26 @@ impl OwnedCodeModeHost {
             return Ok(connection);
         }
         let completed_generation = self.connection_generation.load(Ordering::Acquire);
-        if completed_generation != observed_generation
-            && let Some((generation, error)) = self
-                .last_connection_error
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
+        if let Some((generation, error)) = self
+            .last_connection_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
             && *generation == completed_generation
         {
+            // The most recent spawn attempt failed and nothing has changed since;
+            // return the cached error instead of re-spawning a broken host.
             return Err(ConnectionError::Other(error.clone()));
         }
         let connection = Connection::spawn(&self.host_program).await;
         let new_connection = match connection {
-            Ok(connection) => connection,
+            Ok(connection) => {
+                *self
+                    .last_connection_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                connection
+            }
             Err(error) => {
                 let generation = self.connection_generation.fetch_add(1, Ordering::AcqRel) + 1;
                 *self

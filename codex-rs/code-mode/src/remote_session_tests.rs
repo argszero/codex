@@ -129,3 +129,66 @@ async fn host_exiting_during_handshake_includes_captured_stderr() {
         "error should surface the host's stderr: {error}"
     );
 }
+
+#[tokio::test]
+async fn provider_fails_fast_after_a_spawn_failure() {
+    // A fake host that records each spawn to a marker file and then exits
+    // before completing the handshake, mirroring a host that crashes at
+    // startup. Once the first spawn fails, later attempts must return the
+    // cached error without re-spawning the broken host.
+    let script_dir = std::env::temp_dir().join(format!(
+        "codex-code-mode-failfast-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&script_dir).expect("create script dir");
+    let marker_path = script_dir.join("spawn-count");
+    let script_path = script_dir.join("fake-host.sh");
+    std::fs::write(
+        &script_path,
+        format!(
+            "#!/bin/sh\necho 'spawned' >> '{}'\necho 'init failed: boom' >&2\nexit 1\n",
+            marker_path.display()
+        ),
+    )
+    .expect("write fake host script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake host executable");
+    }
+
+    let provider = ProcessOwnedCodeModeSessionProvider::with_host_program(script_path);
+    let delegate: Arc<dyn codex_code_mode_protocol::CodeModeSessionDelegate> =
+        Arc::new(NoopCodeModeSessionDelegate);
+
+    let first = provider
+        .create_session(Arc::clone(&delegate))
+        .await
+        .err()
+        .expect("first spawn should fail");
+    assert!(
+        first.contains("code-mode host exited during handshake"),
+        "unexpected first error: {first}"
+    );
+    assert!(
+        first.contains("init failed: boom"),
+        "first error should surface the host's stderr: {first}"
+    );
+
+    let second = provider
+        .create_session(Arc::clone(&delegate))
+        .await
+        .err()
+        .expect("second attempt should fail fast with the cached error");
+    assert_eq!(
+        second, first,
+        "fail-fast should return the cached error unchanged"
+    );
+
+    let spawn_count = std::fs::read_to_string(&marker_path)
+        .map(|contents| contents.lines().count())
+        .unwrap_or(0);
+    let _ = std::fs::remove_dir_all(&script_dir);
+    assert_eq!(spawn_count, 1, "the broken host must not be re-spawned");
+}

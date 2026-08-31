@@ -161,7 +161,16 @@ impl Connection {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            // Pin the host's working directory instead of inheriting the
+            // parent's. On Windows Desktop the inherited cwd can be the
+            // Microsoft Store package directory, which ships a Chromium
+            // `dbghelp.dll`; with `SafeDllSearchMode=0` the host then loads
+            // that DLL (and is denied access) instead of the system copy and
+            // crashes with 0xC0000022 before the handshake. The host never
+            // resolves paths against its cwd, so the system temp dir is safe
+            // on every platform and makes the spawn deterministic.
+            .current_dir(std::env::temp_dir());
         scrub_non_inheritable_env_vars(command.as_std_mut());
         let mut child = command.spawn().map_err(|error| ConnectionError::Spawn {
             host_program: host_program.to_path_buf(),

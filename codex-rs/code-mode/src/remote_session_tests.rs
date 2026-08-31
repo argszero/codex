@@ -89,3 +89,49 @@ async fn shutdown_before_open_does_not_spawn_the_host() {
 
     assert_eq!(error, "code mode session is shutting down");
 }
+
+#[tokio::test]
+async fn spawn_pins_the_host_working_directory_to_the_temp_dir() {
+    // A fake host that records its working directory and then exits before
+    // completing the handshake, mirroring a host that crashes at startup.
+    // The marker file proves which cwd the spawned process actually ran in.
+    let script_dir =
+        std::env::temp_dir().join(format!("codex-code-mode-cwd-test-{}", std::process::id()));
+    std::fs::create_dir_all(&script_dir).expect("create script dir");
+    let marker_path = script_dir.join("cwd");
+    let script_path = script_dir.join("fake-host.sh");
+    std::fs::write(
+        &script_path,
+        format!("#!/bin/sh\npwd > '{}'\nexit 1\n", marker_path.display()),
+    )
+    .expect("write fake host script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake host executable");
+    }
+
+    let provider = ProcessOwnedCodeModeSessionProvider::with_host_program(script_path);
+    let delegate: Arc<dyn codex_code_mode_protocol::CodeModeSessionDelegate> =
+        Arc::new(NoopCodeModeSessionDelegate);
+
+    let error = provider
+        .create_session(delegate)
+        .await
+        .err()
+        .expect("fake host should fail the handshake");
+
+    let recorded_cwd = std::fs::read_to_string(&marker_path)
+        .expect("fake host should have recorded its working directory");
+    let _ = std::fs::remove_dir_all(&script_dir);
+    let expected_cwd = std::fs::canonicalize(std::env::temp_dir())
+        .expect("temp dir should canonicalize")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        recorded_cwd.trim(),
+        expected_cwd,
+        "host must not inherit the parent working directory (error: {error})"
+    );
+}

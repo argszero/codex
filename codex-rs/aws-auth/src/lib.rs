@@ -2,14 +2,17 @@ mod config;
 mod discovery;
 mod signing;
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use aws_credential_types::Credentials;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use bytes::Bytes;
 use http::HeaderMap;
 use http::Method;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 pub use discovery::AwsProfile;
 pub use discovery::discover_aws_profiles;
@@ -93,6 +96,10 @@ pub enum AwsAuthError {
 #[derive(Clone)]
 pub struct AwsAuthContext {
     credentials_provider: SharedCredentialsProvider,
+    /// Cached credentials from the last successful `provide_credentials()` call.
+    /// This avoids re-invoking `credential_process` on every SigV4 signing
+    /// operation within the same session.
+    cached_credentials: Arc<Mutex<Option<Credentials>>>,
     region: String,
     service: String,
 }
@@ -114,6 +121,7 @@ impl AwsAuthContext {
 
         Ok(Self {
             credentials_provider,
+            cached_credentials: Arc::new(Mutex::new(None)),
             region,
             service: config.service.trim().to_string(),
         })
@@ -165,8 +173,34 @@ impl AwsAuthContext {
         request: AwsRequestToSign,
         time: SystemTime,
     ) -> Result<AwsSignedRequest, AwsAuthError> {
-        let credentials = self.credentials_provider.provide_credentials().await?;
+        let credentials = self.get_or_refresh_credentials().await?;
         signing::sign_request(&credentials, &self.region, &self.service, request, time)
+    }
+
+    /// Returns cached credentials if they are still valid (more than 5 minutes
+    /// until expiry), otherwise fetches fresh ones from the provider and caches
+    /// them.
+    async fn get_or_refresh_credentials(&self) -> Result<Credentials, AwsAuthError> {
+        // Snapshot under the lock, then drop the guard before any `.await`.
+        let cached = self.cached_credentials.lock().await.clone();
+
+        if let Some(creds) = cached {
+            let valid = match creds.expiry() {
+                // No expiry = static credentials, always valid.
+                None => true,
+                Some(expiry) => {
+                    let remaining = expiry.duration_since(SystemTime::now()).unwrap_or_default();
+                    remaining.as_secs() > 300
+                }
+            };
+            if valid {
+                return Ok(creds);
+            }
+        }
+
+        let fresh = self.credentials_provider.provide_credentials().await?;
+        *self.cached_credentials.lock().await = Some(fresh.clone());
+        Ok(fresh)
     }
 }
 
@@ -214,6 +248,7 @@ mod tests {
                 /*expires_after*/ None,
                 "unit-test",
             )),
+            cached_credentials: Arc::new(Mutex::new(None)),
             region: "us-east-1".to_string(),
             service: "bedrock".to_string(),
         }

@@ -414,6 +414,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_search_matches_first_user_message_preview_not_just_generated_title() {
+        // Regression context: https://github.com/openai/codex/issues/42077
+        // #40492 renames TUI threads to short generated titles ("Write two numbered files")
+        // that rarely contain content keywords. The filesystem search path must keep
+        // matching the first user message ("my name is Alice ..."), which the scan already
+        // carries on ThreadItem.preview / first_user_message — the same fields the TUI
+        // picker's client-side search matches.
+        let home = TempDir::new().expect("temp dir");
+        let uuid = Uuid::from_u128(0x4207_7);
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        write_session_file_with(
+            home.path(),
+            home.path().join("sessions/2025/01/03"),
+            "2025-01-03T12-00-00",
+            uuid,
+            "my name is Alice, please write a file with 1 2 3 4",
+            /*model_provider*/ Some("test-provider"),
+            ThreadHistoryMode::Legacy,
+        )
+        .expect("session file");
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        // The generated rename from #40492 lands in the sidecar session index.
+        codex_rollout::append_thread_name(home.path(), thread_id, "Write two numbered files")
+            .await
+            .expect("append generated thread name");
+
+        let page = store
+            .list_threads(ListThreadsParams {
+                page_size: 10,
+                cursor: None,
+                sort_key: ThreadSortKey::CreatedAt,
+                sort_direction: SortDirection::Desc,
+                allowed_sources: Vec::new(),
+                model_providers: None,
+                cwd_filters: None,
+                section: None,
+                project_id: None,
+                archived: false,
+                search_term: Some("alice".to_string()),
+                relation_filter: None,
+                use_state_db_only: false,
+            })
+            .await
+            .expect("filesystem thread search");
+
+        assert_eq!(
+            page.items.len(),
+            1,
+            "the generated title does not contain 'alice', so the search must match the preview"
+        );
+        assert_eq!(page.items[0].thread_id, thread_id);
+        assert_eq!(
+            page.items[0].preview,
+            "my name is Alice, please write a file with 1 2 3 4"
+        );
+    }
+
+    #[tokio::test]
     async fn list_threads_preserves_sqlite_title_search_results() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());

@@ -1574,18 +1574,30 @@ async fn filter_thread_items_by_search_term(
         return Ok(());
     };
 
-    // The file-backed fallback only has the thread title in the sidecar session index.
-    // Match the SQLite path's title substring filter so search pagination behaves the same
-    // whether the state DB is available or not.
+    // The file-backed fallback keeps the user-visible name in the sidecar session index,
+    // and each item also carries the first user message on `preview`/`first_user_message`
+    // (the same fields the TUI picker's client-side search matches). #40492 renames
+    // threads to short generated titles that rarely contain content keywords, so a
+    // name-only filter makes `/resume` search miss conversations whose first message
+    // would match. Match all three, case-insensitively, to stay consistent with the
+    // picker's client-side search.
+    let normalized_term = search_term.to_lowercase();
     let thread_ids = items
         .iter()
         .filter_map(|item| item.thread_id)
         .collect::<HashSet<_>>();
     let thread_names = find_thread_names_by_ids(codex_home, &thread_ids).await?;
     items.retain(|item| {
-        item.thread_id
+        let matches_sidecar_name = item
+            .thread_id
             .and_then(|thread_id| thread_names.get(&thread_id))
-            .is_some_and(|title| title.contains(search_term))
+            .is_some_and(|title| title.to_lowercase().contains(&normalized_term));
+        let matches_first_message = item
+            .preview
+            .as_deref()
+            .or(item.first_user_message.as_deref())
+            .is_some_and(|text| text.to_lowercase().contains(&normalized_term));
+        matches_sidecar_name || matches_first_message
     });
     Ok(())
 }

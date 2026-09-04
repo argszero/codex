@@ -20,6 +20,16 @@ pub async fn resolve_installation_id(codex_home: &AbsolutePathBuf) -> Result<Str
     let path = codex_home.join(INSTALLATION_ID_FILENAME);
     fs::create_dir_all(codex_home).await?;
     tokio::task::spawn_blocking(move || {
+        // Fast path: reuse an existing valid installation id without requesting
+        // write access. `codex` may run with a codex home that is readable but
+        // not writable (e.g. inside an outer read-only sandbox), in which case
+        // opening the id file read-write fails even though it already holds a
+        // perfectly valid id. Missing, unreadable, or invalid ids fall through
+        // to the locked create/repair path below.
+        if let Some(existing) = read_existing_id(&path)? {
+            return Ok(existing);
+        }
+
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true);
 
@@ -61,6 +71,28 @@ pub async fn resolve_installation_id(codex_home: &AbsolutePathBuf) -> Result<Str
         Ok(installation_id)
     })
     .await?
+}
+
+/// Reads an existing installation id file and returns its contents when they
+/// parse as a valid UUID. Returns `Ok(None)` when the file is missing or does
+/// not hold a valid id, so the caller can create or repair it.
+fn read_existing_id(path: &std::path::Path) -> Result<Option<String>> {
+    let mut file = match OpenOptions::new().read(true).open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    let trimmed = contents.trim();
+    if !trimmed.is_empty()
+        && let Ok(existing) = Uuid::parse_str(trimmed)
+    {
+        Ok(Some(existing.to_string()))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +144,34 @@ mod tests {
             existing.clone(),
         )
         .expect("write installation id");
+
+        let resolved = resolve_installation_id(&codex_home_abs)
+            .await
+            .expect("resolve installation id");
+
+        assert_eq!(
+            resolved,
+            Uuid::parse_str(existing.as_str())
+                .expect("parse existing installation id")
+                .to_string()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_installation_id_reuses_existing_uuid_when_writes_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let codex_home = TempDir::new().expect("create temp dir");
+        let codex_home_abs = codex_home.path().abs();
+        let existing = Uuid::new_v4().to_string();
+        let path = codex_home.path().join(INSTALLATION_ID_FILENAME);
+        std::fs::write(&path, existing.clone()).expect("write installation id");
+        // Simulate an enclosing sandbox that allows reading the existing id but
+        // denies opening it for writing (a read-write open then fails with
+        // EACCES/EPERM while the read-only fast path still succeeds).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
+            .expect("make installation id read-only");
 
         let resolved = resolve_installation_id(&codex_home_abs)
             .await

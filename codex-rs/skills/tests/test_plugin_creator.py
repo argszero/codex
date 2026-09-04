@@ -139,6 +139,61 @@ class PluginCreatorSecurityTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
 
+    def skill_agent_errors(self, policy_yaml: str) -> list[str]:
+        """Validate a skill's `agents/openai.yaml` `policy` section.
+
+        Builds a minimal skill (SKILL.md + agents/openai.yaml) under the temp
+        plugin root and returns the errors produced by the plugin validator's
+        skill-agent validation path.
+        """
+        skill_root = self.plugin_root / "skills" / "demo"
+        (skill_root / "agents").mkdir(parents=True, exist_ok=True)
+        (skill_root / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: Example skill\n---\ncontent\n",
+            encoding="utf-8",
+        )
+        (skill_root / "agents" / "openai.yaml").write_text(
+            "interface:\n"
+            "  display_name: Example\n"
+            "  short_description: Example skill\n"
+            f"{policy_yaml}",
+            encoding="utf-8",
+        )
+        with (
+            patch.object(sys, "path", [str(SCRIPTS), *sys.path]),
+            patch.object(sys, "dont_write_bytecode", True),
+        ):
+            validator = runpy.run_path(str(SCRIPTS / "validate_plugin.py"))
+        errors: list[str] = []
+        validator["validate_skill_manifest"](self.plugin_root / "skills" / "demo", errors)
+        return errors
+
+    def test_skill_agent_validator_accepts_policy_products(self) -> None:
+        errors = self.skill_agent_errors(
+            "policy:\n  products:\n    - chatgpt\n    - codex\n"
+            "  allow_implicit_invocation: true\n"
+        )
+        self.assertEqual(errors, [])
+
+    def test_skill_agent_validator_rejects_policy_products_non_list(self) -> None:
+        errors = self.skill_agent_errors(
+            "policy:\n  products: chatgpt\n  allow_implicit_invocation: true\n"
+        )
+        self.assertTrue(
+            any("policy.products" in error for error in errors),
+            errors,
+        )
+
+    def test_skill_agent_validator_rejects_policy_products_non_string(self) -> None:
+        errors = self.skill_agent_errors(
+            "policy:\n  products:\n    - chatgpt\n    - 123\n"
+            "  allow_implicit_invocation: true\n"
+        )
+        self.assertTrue(
+            any("policy.products" in error for error in errors),
+            errors,
+        )
+
     def test_plugin_validator_accepts_canonical_names(self) -> None:
         for name in ("demo", "Team_Name-1", "team.tools", "team.tools_v2"):
             with self.subTest(name=name):

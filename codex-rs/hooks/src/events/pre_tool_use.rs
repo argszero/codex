@@ -254,7 +254,9 @@ fn parse_completed(
                     status = HookRunStatus::Failed;
                     entries.push(HookOutputEntry {
                         kind: HookOutputEntryKind::Error,
-                        text: "hook returned invalid pre-tool-use JSON output".to_string(),
+                        text: output_parser::invalid_pre_tool_use_output_message(
+                            &run_result.stdout,
+                        ),
                     });
                 }
             }
@@ -695,7 +697,7 @@ mod tests {
             parsed.completed.run.entries,
             vec![HookOutputEntry {
                 kind: HookOutputEntryKind::Error,
-                text: "hook returned invalid pre-tool-use JSON output".to_string(),
+                text: "hook returned invalid pre-tool-use JSON output: stdout is not valid JSON: EOF while parsing a value at line 1 column 12".to_string(),
             }]
         );
     }

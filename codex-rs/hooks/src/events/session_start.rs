@@ -290,16 +290,19 @@ fn parse_completed(
                         kind: HookOutputEntryKind::Error,
                         text: match handler.event_name {
                             HookEventName::SessionStart => {
-                                "hook returned invalid session start JSON output"
+                                output_parser::invalid_session_start_output_message(
+                                    &run_result.stdout,
+                                )
                             }
                             HookEventName::SubagentStart => {
-                                "hook returned invalid subagent start JSON output"
+                                output_parser::invalid_subagent_start_output_message(
+                                    &run_result.stdout,
+                                )
                             }
                             event_name => {
                                 panic!("expected start hook event, got {event_name:?}")
                             }
-                        }
-                        .to_string(),
+                        },
                     });
                 } else {
                     let additional_context = trimmed_stdout.to_string();
@@ -465,7 +468,7 @@ mod tests {
             parsed.completed.run.entries,
             vec![HookOutputEntry {
                 kind: HookOutputEntryKind::Error,
-                text: "hook returned invalid session start JSON output".to_string(),
+                text: "hook returned invalid session start JSON output: stdout is not valid JSON: EOF while parsing an object at line 1 column 53".to_string(),
             }]
         );
     }
@@ -569,5 +572,19 @@ mod tests {
             stderr: stderr.to_string(),
             error: None,
         }
+    }
+
+    #[test]
+    fn unknown_top_level_field_is_named_in_the_failure() {
+        let parsed = parse_completed(
+            &handler(),
+            run_result(Some(0), r#"{"additionalContext":"hello"}"#, ""),
+            /*turn_id*/ None,
+        );
+
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
+        assert_eq!(parsed.completed.run.entries.len(), 1);
+        let text = &parsed.completed.run.entries[0].text;
+        assert!(text.contains("unknown field `additionalContext`"), "{text}");
     }
 }

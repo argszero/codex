@@ -212,7 +212,9 @@ fn parse_completed(
                     status = HookRunStatus::Failed;
                     entries.push(HookOutputEntry {
                         kind: HookOutputEntryKind::Error,
-                        text: "hook returned invalid user prompt submit JSON output".to_string(),
+                        text: output_parser::invalid_user_prompt_submit_output_message(
+                            &run_result.stdout,
+                        ),
                     });
                 } else {
                     let additional_context = trimmed_stdout.to_string();

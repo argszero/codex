@@ -525,7 +525,7 @@ print('{"systemMessage": 123}')
         hook_result.run.entries,
         vec![HookOutputEntry {
             kind: HookOutputEntryKind::Error,
-            text: "hook returned invalid user prompt submit JSON output".to_string(),
+            text: "hook returned invalid user prompt submit JSON output: invalid type: integer `123`, expected a string".to_string(),
         }]
     );
 

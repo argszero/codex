@@ -342,19 +342,151 @@ impl From<HookUniversalOutputWire> for UniversalOutput {
     }
 }
 
-fn parse_json<T>(stdout: &str) -> Option<T>
+/// Why a hook's stdout could not be read as an event's output JSON.
+///
+/// [`parse_json`] collapses every failure into `None`, which is enough for the
+/// parse paths themselves but not for the failure surface: the hook runner has
+/// to tell the author which field was rejected, and only serde knows that. Keep
+/// the reason here so the message builders below can surface it.
+#[derive(Debug)]
+pub(crate) enum HookJsonParseError {
+    /// stdout was empty or whitespace only.
+    Empty,
+    /// stdout was not valid JSON.
+    NotJson(serde_json::Error),
+    /// stdout was valid JSON, but not a JSON object.
+    NotAnObject,
+    /// stdout was a JSON object that does not match the event's output shape.
+    Shape(serde_json::Error),
+}
+
+impl std::fmt::Display for HookJsonParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "hook produced no output"),
+            Self::NotJson(error) => write!(f, "stdout is not valid JSON: {error}"),
+            Self::NotAnObject => write!(f, "stdout is valid JSON but not a JSON object"),
+            // For `deny_unknown_fields` output structs serde names the offending
+            // member and lists the accepted ones, which is the whole point.
+            Self::Shape(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+fn parse_json_result<T>(stdout: &str) -> Result<T, HookJsonParseError>
 where
     T: for<'de> serde::Deserialize<'de>,
 {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
-        return None;
+        return Err(HookJsonParseError::Empty);
     }
-    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(HookJsonParseError::NotJson)?;
     if !value.is_object() {
-        return None;
+        return Err(HookJsonParseError::NotAnObject);
     }
-    serde_json::from_value(value).ok()
+    serde_json::from_value(value).map_err(HookJsonParseError::Shape)
+}
+
+fn parse_json<T>(stdout: &str) -> Option<T>
+where
+    T: for<'de> serde::Deserialize<'de>,
+{
+    parse_json_result(stdout).ok()
+}
+
+/// Builds the failure text for stdout that could not be read as `T`.
+///
+/// A failed hook produces exactly one error entry, and that entry is all the
+/// author gets, so the reason belongs in it: otherwise they learn that *some*
+/// field was rejected without learning which one, which is the difference
+/// between a one-minute fix and an issue report.
+fn invalid_output_message<T>(prefix: &str, stdout: &str) -> String
+where
+    T: for<'de> serde::Deserialize<'de>,
+{
+    match parse_json_result::<T>(stdout) {
+        Ok(_) => prefix.to_string(),
+        Err(error) => format!("{prefix}: {error}"),
+    }
+}
+
+pub(crate) fn invalid_session_start_output_message(stdout: &str) -> String {
+    invalid_output_message::<SessionStartCommandOutputWire>(
+        "hook returned invalid session start JSON output",
+        stdout,
+    )
+}
+
+pub(crate) fn invalid_subagent_start_output_message(stdout: &str) -> String {
+    invalid_output_message::<SubagentStartCommandOutputWire>(
+        "hook returned invalid subagent start JSON output",
+        stdout,
+    )
+}
+
+pub(crate) fn invalid_stop_output_message(stdout: &str) -> String {
+    invalid_output_message::<StopCommandOutputWire>(
+        "hook returned invalid stop hook JSON output",
+        stdout,
+    )
+}
+
+pub(crate) fn invalid_subagent_stop_output_message(stdout: &str) -> String {
+    invalid_output_message::<SubagentStopCommandOutputWire>(
+        "hook returned invalid subagent stop hook JSON output",
+        stdout,
+    )
+}
+
+pub(crate) fn invalid_user_prompt_submit_output_message(stdout: &str) -> String {
+    invalid_output_message::<UserPromptSubmitCommandOutputWire>(
+        "hook returned invalid user prompt submit JSON output",
+        stdout,
+    )
+}
+
+pub(crate) fn invalid_pre_tool_use_output_message(stdout: &str) -> String {
+    invalid_output_message::<PreToolUseCommandOutputWire>(
+        "hook returned invalid pre-tool-use JSON output",
+        stdout,
+    )
+}
+
+pub(crate) fn invalid_post_tool_use_output_message(stdout: &str) -> String {
+    invalid_output_message::<PostToolUseCommandOutputWire>(
+        "hook returned invalid post-tool-use JSON output",
+        stdout,
+    )
+}
+
+pub(crate) fn invalid_permission_request_output_message(stdout: &str) -> String {
+    invalid_output_message::<PermissionRequestCommandOutputWire>(
+        "hook returned invalid permission-request JSON output",
+        stdout,
+    )
+}
+
+pub(crate) fn invalid_pre_compact_output_message(stdout: &str) -> String {
+    invalid_output_message::<PreCompactCommandOutputWire>(
+        "hook returned invalid PreCompact hook JSON output",
+        stdout,
+    )
+}
+
+pub(crate) fn invalid_post_compact_output_message(stdout: &str) -> String {
+    invalid_output_message::<PostCompactCommandOutputWire>(
+        "hook returned invalid PostCompact hook JSON output",
+        stdout,
+    )
+}
+
+pub(crate) fn invalid_interrupt_output_message(stdout: &str) -> String {
+    invalid_output_message::<InterruptCommandOutputWire>(
+        "hook returned invalid interrupt hook JSON output",
+        stdout,
+    )
 }
 
 pub(crate) fn looks_like_json(stdout: &str) -> bool {
@@ -525,6 +657,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
+    use super::invalid_session_start_output_message;
     use super::parse_permission_request;
     use super::parse_user_prompt_submit;
 
@@ -612,6 +745,39 @@ mod tests {
         assert_eq!(
             parsed.invalid_reason,
             Some("PermissionRequest hook returned unsupported interrupt:true".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_output_message_names_the_rejected_field() {
+        // `additionalContext` is legal under `hookSpecificOutput` but not at the
+        // top level, which is the mistake hook authors actually make.
+        let message = invalid_session_start_output_message(r#"{"additionalContext":"hello"}"#);
+        assert!(
+            message.contains("unknown field `additionalContext`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn invalid_output_message_keeps_the_prefix_and_appends_the_reason() {
+        let message = invalid_session_start_output_message(
+            r#"{"hookSpecificOutput":{"hookEventName":"SessionStart""#,
+        );
+        assert!(
+            message.starts_with("hook returned invalid session start JSON output: "),
+            "{message}"
+        );
+        assert!(message.contains("stdout is not valid JSON"), "{message}");
+    }
+
+    #[test]
+    fn invalid_output_message_falls_back_to_the_bare_prefix_for_valid_stdout() {
+        assert_eq!(
+            invalid_session_start_output_message(
+                r#"{"hookSpecificOutput":{"hookEventName":"SessionStart"}}"#
+            ),
+            "hook returned invalid session start JSON output"
         );
     }
 }

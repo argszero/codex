@@ -567,7 +567,7 @@ def validate_skill_agent_manifest(
         else:
             reject_skill_agent_unknown_fields(
                 policy,
-                {"allow_implicit_invocation"},
+                {"allow_implicit_invocation", "products"},
                 skill_root,
                 errors,
                 prefix="policy",
@@ -581,6 +581,16 @@ def validate_skill_agent_manifest(
                     f"skill `{skill_root.name}` agent field "
                     "`policy.allow_implicit_invocation` must be a boolean"
                 )
+            products = policy.get("products")
+            if products is not None:
+                if not isinstance(products, list) or not all(
+                    isinstance(product, str) and product.strip()
+                    for product in products
+                ):
+                    errors.append(
+                        f"skill `{skill_root.name}` agent field "
+                        "`policy.products` must be an array of non-empty strings"
+                    )
 
     dependencies = payload.get("dependencies")
     if dependencies is not None:

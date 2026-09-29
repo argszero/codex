@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use chrono::DateTime;
+use chrono::Duration;
 use chrono::FixedOffset;
 use chrono::Utc;
 
@@ -24,6 +25,7 @@ const MAX_DIRECTORY_ENTRIES: usize = 256;
 const MAX_LOG_FILES: usize = 64;
 const MAX_SESSION_LOG_FILES: usize = 8;
 const MAX_LOG_SEGMENT_BYTES: u64 = 10 * 1024 * 1024;
+pub(super) const MAX_LOG_DAYS: i64 = 30;
 const HANDSHAKE_CHECK_ID: &str = "desktop.app_server.handshake";
 
 pub(super) struct DesktopDiagnostics {
@@ -77,10 +79,9 @@ pub(super) async fn collect() -> Option<DesktopDiagnostics> {
 
     let directory = desktop_log_root(application.identity);
     let (running, handshake) = match &directory {
-        Some(root) => inspect_desktop_session(
-            &root.join(Utc::now().format("%Y/%m/%d").to_string()),
-            |pid| platform::application_running(&application, pid),
-        ),
+        Some(root) => inspect_desktop_session(&recent_log_directories(root, Utc::now()), |pid| {
+            platform::application_running(&application, pid)
+        }),
         None => (false, stopped_desktop_check()),
     };
     let log_directory = directory
@@ -109,27 +110,53 @@ pub(super) async fn collect() -> Option<DesktopDiagnostics> {
     })
 }
 
+/// Inspects desktop logs from the given day directories, newest first.
+///
+/// A running app keeps writing to the directory of the current day, but it
+/// records its startup handshake in the directory of the day it started in,
+/// which is an earlier one whenever the app runs across UTC midnights.
 pub(super) fn inspect_desktop_session(
-    directory: &Path,
+    directories: &[PathBuf],
     application_running: impl Fn(u32) -> bool,
 ) -> (bool, DoctorCheck) {
-    let logs = discover_desktop_logs(directory);
-    let Some(session) = logs.iter().find(|log| application_running(log.process_id)) else {
+    let logs = directories
+        .iter()
+        .map(|directory| discover_desktop_logs(directory))
+        .collect::<Vec<_>>();
+
+    let Some(session_id) = logs
+        .iter()
+        .flatten()
+        .find(|log| application_running(log.process_id))
+        .map(|log| log.session_id.clone())
+    else {
         return (false, stopped_desktop_check());
     };
 
-    let check = latest_session_handshake(&logs, &session.session_id).map_or_else(
-        || {
-            platform::desktop_check(
-                HANDSHAKE_CHECK_ID,
-                CheckStatus::Ok,
-                "no desktop app-server handshake was recorded",
-            )
-        },
-        |event| event.outcome.into_check(),
-    );
+    for logs in &logs {
+        if let Some(event) = latest_session_handshake(logs, &session_id) {
+            return (true, event.outcome.into_check());
+        }
+    }
 
-    (true, check)
+    (true, no_handshake_check())
+}
+
+/// The day directories that may hold desktop logs, newest first.
+///
+/// Logs are written under `<root>/<year>/<month>/<day>/`, so the handshake of a
+/// session that started earlier lives under an earlier date. The window is
+/// bounded to keep the scan cheap.
+pub(super) fn recent_log_directories(root: &Path, now: DateTime<Utc>) -> Vec<PathBuf> {
+    (0..MAX_LOG_DAYS)
+        .map(|days_ago| {
+            root.join(
+                (now - Duration::days(days_ago))
+                    .format("%Y/%m/%d")
+                    .to_string(),
+            )
+        })
+        .collect()
 }
 
 fn desktop_log_root(identity: &str) -> Option<PathBuf> {
@@ -297,6 +324,14 @@ fn stopped_desktop_check() -> DoctorCheck {
         HANDSHAKE_CHECK_ID,
         CheckStatus::Ok,
         "the desktop application is not running",
+    )
+}
+
+fn no_handshake_check() -> DoctorCheck {
+    platform::desktop_check(
+        HANDSHAKE_CHECK_ID,
+        CheckStatus::Ok,
+        "no desktop app-server handshake was recorded",
     )
 }
 

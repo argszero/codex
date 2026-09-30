@@ -330,13 +330,16 @@ fn parse_completed(
                     entries.push(HookOutputEntry {
                         kind: HookOutputEntryKind::Error,
                         text: match hook_event_name {
-                            HookEventName::Stop => "hook returned invalid stop hook JSON output",
+                            HookEventName::Stop => {
+                                output_parser::invalid_stop_output_message(&run_result.stdout)
+                            }
                             HookEventName::SubagentStop => {
-                                "hook returned invalid subagent stop hook JSON output"
+                                output_parser::invalid_subagent_stop_output_message(
+                                    &run_result.stdout,
+                                )
                             }
                             _ => unreachable!("validated stop hook event"),
-                        }
-                        .to_string(),
+                        },
                     });
                 }
             }
@@ -634,7 +637,7 @@ mod tests {
             parsed.completed.run.entries,
             vec![HookOutputEntry {
                 kind: HookOutputEntryKind::Error,
-                text: "hook returned invalid stop hook JSON output".to_string(),
+                text: "hook returned invalid stop hook JSON output: stdout is not valid JSON: expected ident at line 1 column 2".to_string(),
             }]
         );
 

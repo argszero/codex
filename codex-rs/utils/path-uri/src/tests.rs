@@ -833,6 +833,87 @@ fn join_normalizes_relative_uri_segments() {
 }
 
 #[test]
+fn join_percent_encodes_control_characters_in_path_segments() {
+    for (base, relative, expected) in [
+        (
+            "file:///workspace",
+            "config.txt\tx",
+            "file:///workspace/config.txt%09x",
+        ),
+        ("file:///workspace", "a\nb", "file:///workspace/a%0Ab"),
+        ("file:///workspace", "a\rb", "file:///workspace/a%0Db"),
+        (
+            "file:///workspace",
+            "a b%c\td",
+            "file:///workspace/a%20b%25c%09d",
+        ),
+        (
+            "file:///C:/workspace",
+            "a\tb\\c",
+            "file:///C:/workspace/a%09b/c",
+        ),
+        // An absolute path reaches the segments through the same encoding.
+        (
+            "file:///workspace",
+            "/tmp/config.txt\tx",
+            "file:///tmp/config.txt%09x",
+        ),
+        (
+            "file:///C:/workspace",
+            "D:\\tmp\\config.txt\tx",
+            "file:///D:/tmp/config.txt%09x",
+        ),
+        // Literal escapes stay filename text.
+        (
+            "file:///workspace",
+            "config.txt%09x",
+            "file:///workspace/config.txt%2509x",
+        ),
+    ] {
+        let base = PathUri::parse(base).expect("valid base URI");
+        let expected = PathUri::parse(expected).expect("valid expected URI");
+        assert_eq!(base.join(relative), Ok(expected), "joining {relative:?}");
+    }
+}
+
+#[test]
+fn joined_control_characters_round_trip_to_native_paths() {
+    let base = PathUri::parse("file:///workspace").expect("valid base URI");
+    let joined = base
+        .join("config.txt\tx")
+        .expect("control characters are path text");
+
+    assert_eq!(joined.encoded_path(), "/workspace/config.txt%09x");
+    assert_eq!(joined.basename(), Some("config.txt\tx".to_string()));
+    assert_eq!(
+        joined.join_descendant("a\nb"),
+        Ok(PathUri::parse("file:///workspace/config.txt%09x/a%0Ab").expect("valid expected URI"))
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        joined.to_abs_path().expect("native path"),
+        AbsolutePathBuf::try_from("/workspace/config.txt\tx").expect("absolute expected path")
+    );
+}
+
+#[test]
+fn joined_control_characters_reach_absolute_path_parsing() {
+    let base = PathUri::parse("file:///workspace").expect("valid base URI");
+    for (path, expected) in [
+        ("/tmp/a\tb", "file:///tmp/a%09b"),
+        ("/tmp/a\nb", "file:///tmp/a%0Ab"),
+        ("/tmp/a\rb", "file:///tmp/a%0Db"),
+        ("/tmp/a%09b", "file:///tmp/a%2509b"),
+    ] {
+        assert_eq!(
+            base.join(path),
+            Ok(PathUri::parse(expected).expect("valid expected URI")),
+            "joining {path:?}"
+        );
+    }
+}
+
+#[test]
 fn join_descendant_uses_the_base_path_convention() {
     for (base, relative, expected) in [
         (

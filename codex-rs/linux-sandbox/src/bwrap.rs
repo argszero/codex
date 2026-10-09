@@ -619,8 +619,14 @@ fn create_filesystem_args(
         .collect();
     unreadable_ancestors_of_writable_roots.sort_by_key(|path| path_depth(path));
 
+    let mut masked_file_targets = HashSet::new();
     for unreadable_root in &unreadable_ancestors_of_writable_roots {
-        append_unreadable_root_args(&mut bwrap_args, unreadable_root, &allowed_write_paths)?;
+        append_unreadable_root_args(
+            &mut bwrap_args,
+            unreadable_root,
+            &allowed_write_paths,
+            &mut masked_file_targets,
+        )?;
     }
 
     for writable_root in &sorted_writable_roots {
@@ -752,8 +758,16 @@ fn create_filesystem_args(
                 remap_paths_for_symlink_target(nested_unreadable_roots, root, target);
         }
         nested_unreadable_roots.sort_by_key(|path| path_depth(path));
+        // Binding this root shadows masks applied before it, so every root
+        // starts a new mask phase that is allowed to re-mask the same file.
+        let mut masked_file_targets = HashSet::new();
         for unreadable_root in nested_unreadable_roots {
-            append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
+            append_unreadable_root_args(
+                &mut bwrap_args,
+                &unreadable_root,
+                &allowed_write_paths,
+                &mut masked_file_targets,
+            )?;
         }
     }
 
@@ -768,8 +782,14 @@ fn create_filesystem_args(
         .cloned()
         .collect();
     rootless_unreadable_roots.sort_by_key(|path| path_depth(path));
+    let mut masked_file_targets = HashSet::new();
     for unreadable_root in rootless_unreadable_roots {
-        append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
+        append_unreadable_root_args(
+            &mut bwrap_args,
+            &unreadable_root,
+            &allowed_write_paths,
+            &mut masked_file_targets,
+        )?;
     }
 
     if options.mask_wslg_distro
@@ -1325,10 +1345,32 @@ fn append_existing_empty_directory_args(
         ));
 }
 
+/// Claims the single-file mask for `path` within the current mount phase,
+/// returning `false` when an alias of the same file already claimed it.
+///
+/// Denials reach Linux as both the literal and the resolved spelling of a path,
+/// so the identity comes from the longest existing ancestor: that collapses two
+/// spellings of one file while leaving hard links, which stay readable at their
+/// other path, as separate identities.
+fn claim_file_mask_target(path: &Path, masked_file_targets: &mut HashSet<PathBuf>) -> bool {
+    let mut ancestor = Some(path);
+    while let Some(candidate) = ancestor {
+        if let Ok(canonical) = fs::canonicalize(candidate)
+            && let Ok(suffix) = path.strip_prefix(candidate)
+        {
+            return masked_file_targets.insert(canonical.join(suffix));
+        }
+        ancestor = candidate.parent();
+    }
+    // Only reachable when even `/` cannot be canonicalized; mask without dedup.
+    true
+}
+
 fn append_unreadable_root_args(
     bwrap_args: &mut BwrapArgs,
     unreadable_root: &Path,
     allowed_write_paths: &[PathBuf],
+    masked_file_targets: &mut HashSet<PathBuf>,
 ) -> Result<()> {
     if let Some(symlink) =
         first_writable_symlink_component_in_path(unreadable_root, allowed_write_paths)
@@ -1353,6 +1395,14 @@ fn append_unreadable_root_args(
         {
             append_missing_empty_file_bind_data_args(bwrap_args, &first_missing_component)?;
         }
+        return Ok(());
+    }
+
+    // Directories stack as `--tmpfs` masks, but bubblewrap unlinks each
+    // `--ro-bind-data` source file once it is mounted, so a second mask of one
+    // file fails with `ENOENT`. The first mask already hides the file through
+    // its alias, because the symlink itself stays read-only.
+    if !unreadable_root.is_dir() && !claim_file_mask_target(unreadable_root, masked_file_targets) {
         return Ok(());
     }
 

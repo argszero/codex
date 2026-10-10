@@ -26,9 +26,11 @@ mod absolute_path_normalization;
 mod api_path_string;
 mod config_path;
 mod native_path_bytes;
+mod path_encoding;
 mod platform;
 
 use absolute_path_normalization::path_uri_from_segments;
+use path_encoding::encode_path_segment;
 
 pub use api_path_string::LegacyAppPathString;
 pub use api_path_string::LegacyAppPathStringError;
@@ -439,9 +441,9 @@ impl PathUri {
     /// current directory belongs to the executor.
     /// Empty and `.` segments are ignored, while `..` removes one segment
     /// without escaping the POSIX root, Windows drive, or UNC share. Literal
-    /// `%`, `?`, and `#` characters are percent-encoded as filename text. Paths
-    /// containing a null character are rejected because they cannot be safely
-    /// converted to native paths.
+    /// `%`, `?`, and `#` characters are percent-encoded as filename text, as are
+    /// ASCII tab, LF, and CR. Paths containing a null character are rejected
+    /// because they cannot be safely converted to native paths.
     /// Opaque fallback URIs created by [`Self::from_abs_path`] reject non-empty
     /// joins. Home-directory expansion also requires executor-native context
     /// and is intentionally not performed.
@@ -511,23 +513,33 @@ impl PathUri {
                     depth -= 1;
                 }
             }
-            let path = match convention {
-                PathConvention::Posix => path.to_string(),
-                PathConvention::Windows => path.replace('\\', "/"),
-            };
-            for component in path.split('/') {
-                match component {
-                    "" | "." => {}
-                    ".." => {
-                        if depth > anchor_depth {
-                            segments.pop();
-                            depth -= 1;
-                        }
+        }
+        let path = match convention {
+            PathConvention::Posix => path.to_string(),
+            PathConvention::Windows => path.replace('\\', "/"),
+        };
+        for component in path.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    if depth > anchor_depth {
+                        let Ok(mut segments) = url.path_segments_mut() else {
+                            unreachable!("validated file URLs support hierarchical path segments");
+                        };
+                        segments.pop();
+                        depth -= 1;
                     }
-                    component => {
-                        segments.push(component);
-                        depth += 1;
+                }
+                component => {
+                    // The URL path setter drops ASCII tab, LF and CR, so append the segment's
+                    // encoded form to the encoded path instead of pushing the raw text.
+                    let mut encoded_path = url.path().to_string();
+                    if !encoded_path.ends_with('/') {
+                        encoded_path.push('/');
                     }
+                    encoded_path.push_str(&encode_path_segment(component));
+                    url.set_path(&encoded_path);
+                    depth += 1;
                 }
             }
         }

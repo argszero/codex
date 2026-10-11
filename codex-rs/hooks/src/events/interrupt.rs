@@ -139,13 +139,13 @@ fn parse_completed(
                 } else {
                     status = HookRunStatus::Failed;
                     let text = if output_parser::looks_like_json(&run_result.stdout) {
-                        "hook returned invalid interrupt hook JSON output"
+                        output_parser::invalid_interrupt_output_message(&run_result.stdout)
                     } else {
-                        "Interrupt hook returned non-JSON stdout"
+                        "Interrupt hook returned non-JSON stdout".to_string()
                     };
                     entries.push(HookOutputEntry {
                         kind: HookOutputEntryKind::Error,
-                        text: text.to_string(),
+                        text,
                     });
                 }
             }

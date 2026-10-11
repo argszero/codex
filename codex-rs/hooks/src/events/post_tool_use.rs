@@ -252,7 +252,9 @@ fn parse_completed(
                     status = HookRunStatus::Failed;
                     entries.push(HookOutputEntry {
                         kind: HookOutputEntryKind::Error,
-                        text: "hook returned invalid post-tool-use JSON output".to_string(),
+                        text: output_parser::invalid_post_tool_use_output_message(
+                            &run_result.stdout,
+                        ),
                     });
                 }
             }

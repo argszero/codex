@@ -235,6 +235,7 @@ fn parse_pre_completed(
         turn_id,
         "PreCompact",
         output_parser::parse_pre_compact,
+        output_parser::invalid_pre_compact_output_message,
     )
 }
 
@@ -249,6 +250,7 @@ fn parse_post_completed(
         turn_id,
         "PostCompact",
         output_parser::parse_post_compact,
+        output_parser::invalid_post_compact_output_message,
     )
 }
 
@@ -258,6 +260,7 @@ fn parse_completed(
     turn_id: Option<String>,
     event_label: &'static str,
     parse_output: fn(&str) -> Option<output_parser::StatelessHookOutput>,
+    invalid_output_message: fn(&str) -> String,
 ) -> dispatcher::ParsedHandler<CompactHandlerData> {
     let mut entries = Vec::new();
     let mut status = HookRunStatus::Completed;
@@ -307,7 +310,7 @@ fn parse_completed(
                     status = HookRunStatus::Failed;
                     entries.push(HookOutputEntry {
                         kind: HookOutputEntryKind::Error,
-                        text: format!("hook returned invalid {event_label} hook JSON output"),
+                        text: invalid_output_message(&run_result.stdout),
                     });
                 }
             }
@@ -416,7 +419,8 @@ mod tests {
             parsed.completed.run.entries,
             vec![HookOutputEntry {
                 kind: HookOutputEntryKind::Error,
-                text: "hook returned invalid PreCompact hook JSON output".to_string(),
+                text: "hook returned invalid PreCompact hook JSON output: unknown field `decision`"
+                    .to_string(),
             }]
         );
     }

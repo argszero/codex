@@ -39,18 +39,31 @@ fn system_message_becomes_warning() {
 
 #[test]
 fn invalid_json_outputs_fail() {
-    for stdout in [
-        r#"{"continue":true}"#,
-        r#"{"stopReason":null}"#,
-        r#"{"suppressOutput":false}"#,
-        r#"{"decision":"block"}"#,
-        r#"{"systemMessage":"watch the tide""#,
+    // Every rejected stdout keeps the same prefix but now carries its own
+    // reason, so the cases assert their own message instead of sharing one.
+    for (stdout, expected) in [
+        (
+            r#"{"continue":true}"#,
+            "hook returned invalid interrupt hook JSON output: unknown field `continue`, expected `systemMessage`",
+        ),
+        (
+            r#"{"stopReason":null}"#,
+            "hook returned invalid interrupt hook JSON output: unknown field `stopReason`, expected `systemMessage`",
+        ),
+        (
+            r#"{"suppressOutput":false}"#,
+            "hook returned invalid interrupt hook JSON output: unknown field `suppressOutput`, expected `systemMessage`",
+        ),
+        (
+            r#"{"decision":"block"}"#,
+            "hook returned invalid interrupt hook JSON output: unknown field `decision`, expected `systemMessage`",
+        ),
+        (
+            r#"{"systemMessage":"watch the tide""#,
+            "hook returned invalid interrupt hook JSON output: stdout is not valid JSON: EOF while parsing an object at line 1 column 33",
+        ),
     ] {
-        assert_failed(
-            stdout,
-            Some(0),
-            "hook returned invalid interrupt hook JSON output",
-        );
+        assert_failed(stdout, Some(0), expected);
     }
 }
 

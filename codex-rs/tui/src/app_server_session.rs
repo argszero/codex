@@ -3822,6 +3822,65 @@ mod tests {
         Ok(())
     }
 
+    /// The startup path forwards the configured tier as-is, so `unsupported_service_tier_warning`
+    /// still sees a value it is willing to warn about.
+    #[tokio::test]
+    async fn launch_forwards_unsupported_service_tier_unchanged() -> Result<()> {
+        let codex_home = tempfile::tempdir()?;
+        let mut config = build_config(&codex_home).await;
+        config.model = Some("gpt-5.5".to_string());
+        let unsupported_tier = ServiceTier::Fast.request_value().to_string();
+        config.service_tier = Some(unsupported_tier.clone());
+        config
+            .features
+            .set_enabled(Feature::FastMode, /*enabled*/ true)?;
+
+        let params = thread_start_params_from_config(
+            &config,
+            ThreadParamsMode::Embedded,
+            /*remote_cwd_override*/ None,
+            /*session_start_source*/ None,
+        );
+
+        assert_eq!(params.service_tier, Some(Some(unsupported_tier)));
+        Ok(())
+    }
+
+    /// Thread-recreation paths rewrite a tier the model catalog does not advertise into the
+    /// explicit `default` sentinel, which is the one value `unsupported_service_tier_warning`
+    /// filters out. Characterizes the request-side behavior so a later refactor cannot silently
+    /// change which sessions are able to emit that warning.
+    #[tokio::test]
+    async fn recreation_replaces_unsupported_service_tier_with_default() -> Result<()> {
+        let codex_home = tempfile::tempdir()?;
+        let server_config = build_config(&codex_home).await;
+        let mut config = server_config.clone();
+        config.model = Some("gpt-5.5".to_string());
+        config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+        config
+            .features
+            .set_enabled(Feature::FastMode, /*enabled*/ true)?;
+        let mut app_server = crate::start_embedded_app_server_for_picker(&server_config).await?;
+        app_server.thread_params_mode = ThreadParamsMode::Remote;
+        let mut preset = crate::test_support::TEST_MODEL_PRESETS
+            .iter()
+            .find(|preset| preset.model == "gpt-5.5")
+            .expect("gpt-5.5 test preset")
+            .clone();
+        preset.service_tiers.clear();
+        preset.default_service_tier = None;
+        app_server.available_models = vec![preset];
+
+        let started = app_server.start_thread(&config).await?;
+        app_server.shutdown().await?;
+
+        assert_eq!(
+            started.session.service_tier.as_deref(),
+            Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE)
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn persisted_resume_does_not_forward_implicit_service_tier() -> Result<()> {
         let codex_home = tempfile::tempdir().expect("tempdir");

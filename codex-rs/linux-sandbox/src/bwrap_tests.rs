@@ -1550,3 +1550,51 @@ fn synthetic_mount_target_paths(args: &BwrapArgs) -> Vec<PathBuf> {
         .map(|target| target.path().to_path_buf())
         .collect()
 }
+
+#[test]
+fn symlinked_deny_entries_mask_one_file_once() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let real_root = temp_dir.path().join("real");
+    let link_root = temp_dir.path().join("link");
+    let real_denied = real_root.join("auth.json");
+    let link_denied = link_root.join("auth.json");
+    std::fs::create_dir_all(&real_root).expect("create real root");
+    std::fs::write(&real_denied, "{}\n").expect("write denied file");
+    std::os::unix::fs::symlink(&real_root, &link_root).expect("create symlink");
+    // Denying both spellings of one file keeps the deny valid whichever path
+    // a command uses, but it must build a single mask: bubblewrap unlinks
+    // each `--ro-bind-data` source once it is mounted, so a second mask of
+    // the same file fails with ENOENT.
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry::new(
+            AbsolutePathBuf::from_absolute_path(&real_denied)
+                .expect("absolute denied file")
+                .into(),
+            FileSystemAccessMode::Deny,
+        ),
+        FileSystemSandboxEntry::new(
+            AbsolutePathBuf::from_absolute_path(&link_denied)
+                .expect("absolute symlinked denial")
+                .into(),
+            FileSystemAccessMode::Deny,
+        ),
+    ]);
+
+    let args = create_filesystem_args(&policy, temp_dir.path(), BwrapOptions::default())
+        .expect("filesystem args");
+    let denied_masks = args
+        .args
+        .windows(3)
+        .filter(|window| {
+            window[0] == "--ro-bind-data"
+                && (window[2] == path_to_string(&real_denied)
+                    || window[2] == path_to_string(&link_denied))
+        })
+        .count();
+
+    assert_eq!(
+        denied_masks, 1,
+        "one file denied through a symlinked alias must be masked once: {:#?}",
+        args.args
+    );
+}

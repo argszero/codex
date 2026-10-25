@@ -1,5 +1,6 @@
 use crate::PathConvention;
 use crate::PathUri;
+use crate::path_encoding::encode_path_segment;
 use url::Url;
 
 pub(super) fn path_uri_from_segments<'a>(
@@ -38,9 +39,12 @@ pub(super) fn path_uri_from_segments<'a>(
     {
         normalized_segments.push("");
     }
-    {
-        let mut url_segments = url.path_segments_mut().ok()?;
-        url_segments.clear().extend(normalized_segments);
-    }
+    // The URL path setter drops ASCII tab, LF and CR, so the segments are encoded before they
+    // reach the URL rather than extended into it as raw text.
+    let path = normalized_segments
+        .iter()
+        .map(|segment| format!("/{}", encode_path_segment(segment)))
+        .collect::<String>();
+    url.set_path(&path);
     PathUri::try_from(url).ok()
 }
